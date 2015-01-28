@@ -3,7 +3,9 @@ import logging
 import sys
 import pyudev
 import re
+import time
 from commands import getstatusoutput
+import hub_control
 
 context = pyudev.Context()
 
@@ -24,9 +26,21 @@ def parse_arguments():
 
     return parser.parse_args()
 
-def deploy_firmware(device, vendor, model, filename, alt):
-    code, ret = getstatusoutput('dfu-util -a %d -D %s' % (alt, filename))
+def deploy_firmware(device, vendor, model, filename, alt, blink_led=True):
+    if blink_led:
+        hub = hub_control.find_hub(int(device.parent['ID_VENDOR_ID'], 16),
+                int(device.parent['ID_MODEL_ID'], 16))
+        if hub is not None:
+            hub_control.control_led(hub, int(device['DEVPATH'][-1]), 1)
+        else:
+            logging.warn("Cannot find hub or hub doesn't support indication")
+    logging.debug('Deploying firmware to %s' % device['ID_SERIAL_SHORT'])
+    code, ret = getstatusoutput('dfu-util -nR -a %d -S %s -D %s' %\
+            (alt, device['ID_SERIAL_SHORT'], filename))
     logging.debug(ret)
+    if blink_led:
+        if hub is not None:
+            hub_control.control_led(hub, int(device['DEVPATH'][-1]), 0)
     return code
 
 def main():
