@@ -3,6 +3,8 @@ import logging
 import sys
 import pyudev
 import re
+import threading
+import usb.core
 from commands import getstatusoutput
 
 context = pyudev.Context()
@@ -24,10 +26,46 @@ def parse_arguments():
 
     return parser.parse_args()
 
+def find_parent_hub(device):
+    vendor = int(device.parent['ID_VENDOR_ID'], 16)
+    product = int(device.parent['ID_MODEL_ID'], 16)
+    hub = usb.core.find(bDeviceClass=usb.CLASS_HUB, idVendor=vendor, idProduct=product)
+    if hub is None:
+        return None
+    port = (usb.TYPE_CLASS | usb.RECIP_DEVICE)
+    dir = 0x80 # USB_DIR_IN
+    desc = hub.ctrl_transfer(dir | port,
+                                 usb.REQ_GET_DESCRIPTOR,
+                                 wValue = usb.DT_HUB << 8,
+                                 wIndex = 0,
+                                 data_or_wLength = 1024, timeout = 1000)
+    if not desc:
+        return None
+    logging.debug("Got desc: "+str(desc))
+    return hub
+
+def set_led_on_hub(hub, port, led):
+    request = usb.REQ_SET_FEATURE
+    feature = 22 # USB_PORT_FEAT_INDICATOR
+    port_type = (usb.TYPE_CLASS | usb.RECIP_OTHER)
+    index = (led << 8) | port
+    hub.ctrl_transfer(port_type, request, wValue=feature, wIndex=index, data_or_wLength=None, timeout=1000)
+
 def deploy_firmware(device, vendor, model, filename, alt):
-    code, ret = getstatusoutput('dfu-util -a %d -D %s' % (alt, filename))
+    t = threading.Thread(target=firmware_deploy_thread, args=(device, alt, filename))
+    t.start()
+
+def firmware_deploy_thread(device, alt, filename):
+    hub = find_parent_hub(device)
+    port = int(device['DEVPATH'][-1])
+    if hub is not None:
+        set_led_on_hub(hub, port, 1)
+    logging.info('Deploying firmware to '+device['ID_SERIAL_SHORT'])
+    code, ret = getstatusoutput('dfu-util -nR -a %d -S %s -D %s' % (alt, device['ID_SERIAL_SHORT'], filename))
     logging.debug(ret)
-    return code
+    if hub is not None:
+        set_led_on_hub(hub, port, 0)
+
 
 def main():
     args = parse_arguments()
