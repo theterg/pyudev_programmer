@@ -8,10 +8,11 @@ import re
 import threading
 
 class DFUProcess(threading.Thread):
-    def __init__(self, cmd, prog_callback=None):
+    def __init__(self, cmd, serial=None, prog_callback=None):
         super(DFUProcess, self).__init__()
         self.running = True
         self.daemon = True
+        self.serial = serial
         self.prog_callback = prog_callback
         self.last_output = ''
         self.last_error = ''
@@ -19,6 +20,7 @@ class DFUProcess(threading.Thread):
         self.last_error_time = 0.0
         self.line_log = []
         self.progress = 0
+        self.returncode = None
         self.p = launchproc(cmd)
         self.start()
 
@@ -28,7 +30,7 @@ class DFUProcess(threading.Thread):
             self.progress = int(match.groups()[0])
             if self.prog_callback is not None:
                 # Send progress, but we're still running!
-                self.prog_callback(self.progress, False, None)
+                self.prog_callback(self, self.progress, False, None)
 
     def line_callback(self, line):
         self.last_output = line
@@ -75,15 +77,15 @@ class DFUProcess(threading.Thread):
                     stderr_buf = []
             except IOError:
                 pass
-            code = self.p.poll()
+            self.returncode = self.p.poll()
             # Ensure we've read everything out of the pipes before quitting
-            if code is not None and len(stdout) == 0 and len(stderr) == 0:
+            if self.returncode is not None and len(stdout) == 0 and len(stderr) == 0:
                 running = False
                 break
         if exception_encountered is not None:
             raise e
         if self.prog_callback is not None:
-            self.prog_callback(self.progress, True, self.p.returncode)
+            self.prog_callback(self, self.progress, True, self.returncode)
 
     def stop(self):
         self.running = False
@@ -97,7 +99,7 @@ def launchproc(cmd):
     fcntl(p.stderr, F_SETFL, flags | O_NONBLOCK)
     return p
 
-def my_cb(prog, complete, error):
+def my_cb(p, prog, complete, error):
     print (prog, complete, error)
     if complete and error:
         print "Finished with error '%s', dumping log:" % (p.last_error)

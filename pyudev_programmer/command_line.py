@@ -6,10 +6,15 @@ import re
 import time
 from commands import getstatusoutput
 import hub_control
+from DFUProcess import DFUProcess
+from threading import Event
 
 context = pyudev.Context()
 
 logger = logging.getLogger(__name__)
+
+instances = []
+instance_activity = Event()
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='')
@@ -26,22 +31,36 @@ def parse_arguments():
 
     return parser.parse_args()
 
-def deploy_firmware(device, vendor, model, filename, alt, blink_led=True):
-    if blink_led:
-        hub = hub_control.find_hub(int(device.parent['ID_VENDOR_ID'], 16),
-                int(device.parent['ID_MODEL_ID'], 16))
-        if hub is not None:
-            hub_control.control_led(hub, int(device['DEVPATH'][-1]), 1)
+def instance_update(p, progress, complete, error):
+    if complete:
+        if error:
+            logging.error('Error uploading to device %s: %s', p.serial, p.last_error)
+            logging.debug('Dump from last failure: %s' % ('\n'.join(p.line_log)))
         else:
-            logging.warn("Cannot find hub or hub doesn't support indication")
-    logging.debug('Deploying firmware to %s' % device['ID_SERIAL_SHORT'])
-    code, ret = getstatusoutput('dfu-util -nR -a %d -S %s -D %s' %\
-            (alt, device['ID_SERIAL_SHORT'], filename))
-    logging.debug(ret)
-    if blink_led:
-        if hub is not None:
-            hub_control.control_led(hub, int(device['DEVPATH'][-1]), 0)
-    return code
+            logging.info('Device %s successfully updated', p.serial)
+        # Attempt to remove self from list
+        try:
+            instances.remove(p)
+        except ValueError:
+            pass
+    instance_activity.set()
+    #if blink_led
+    #    if hub is not None:
+    #        hub_control.control_led(hub, int(device['DEVPATH'][-1]), 0)
+
+def deploy_firmware(device, vendor, model, filename, alt):
+    #if blink_led:
+    #    hub = hub_control.find_hub(int(device.parent['ID_VENDOR_ID'], 16),
+    #            int(device.parent['ID_MODEL_ID'], 16))
+    #    if hub is not None:
+    #        hub_control.control_led(hub, int(device['DEVPATH'][-1]), 1)
+    #    else:
+    #        logging.warn("Cannot find hub or hub doesn't support indication")
+    logging.info('Deploying firmware to %s' % device['ID_SERIAL_SHORT'])
+    p = DFUProcess('dfu-util -nR -a %d -S %s -D %s' %\
+            (alt, device['ID_SERIAL_SHORT'], filename),
+            serial=device['ID_SERIAL_SHORT'], prog_callback=instance_update)
+    instances.append(p)
 
 def main():
     args = parse_arguments()
@@ -65,12 +84,28 @@ def main():
             return
         if 'ID_VENDOR_ID' in device and device['ID_VENDOR_ID'] == args.vendor and\
                 'ID_MODEL_ID' in device and device['ID_MODEL_ID'] == args.model:
-            logging.info('Found a new DFU device %s' % str(device))
+            logging.debug('Found a new DFU device %s' % str(device))
             deploy_firmware(device, args.vendor, args.model, args.file, args.alt)
 
     observer = pyudev.MonitorObserver(monitor, found_device)
     observer.start()
-    _ = input('press a key to exit')
+    logging.info('Now listening for devices, press Ctrl-C to exit')
+    while(True):
+        instance_activity.wait(1.0)
+        if instance_activity.isSet():
+            statusmsg = []
+            for p in instances:
+                # In case we failed to remove an instance above:
+                # Ensure any instances that have completed are removed
+                if p.returncode is not None:
+                    instances.remove(p)
+                else:
+                    statusmsg.append('%s: %d%% ' % (p.serial, p.progress))
+            # Print status to screen!
+            sys.stdout.write('\r'+''.join(statusmsg))
+            sys.stdout.flush()
+        # Rate limit the console output
+        time.sleep(0.2)
 
 if __name__ == '__main__':
     main()
