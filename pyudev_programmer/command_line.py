@@ -43,6 +43,7 @@ def instance_update(p, progress, complete, error):
             instances.remove(p)
         except ValueError:
             pass
+    # Inform "UI thread" that an update is available
     instance_activity.set()
     #if blink_led
     #    if hub is not None:
