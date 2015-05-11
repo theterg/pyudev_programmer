@@ -1,8 +1,10 @@
 import argparse
 import logging
 import sys
+import os
 import pyudev
 import re
+from copy import copy
 import time
 from commands import getstatusoutput
 import hub_control
@@ -15,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 instances = []
 instance_activity = Event()
+display = None
+gfx = None
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='')
@@ -28,21 +32,49 @@ def parse_arguments():
             help='The the Altsetting of the DFU interface (default is usually ok)')
     parser.add_argument('file', type=str,
             help='The DFU firmware file to deploy')
+    parser.add_argument('--OLED', choices=['SSD1331'],
+            help='Display status on external OLED display (Raspberry Pi Only)')
 
     return parser.parse_args()
 
+
+def clear_instance(p):
+    try:
+        instances.remove(p)
+    except ValueError:
+        return
+
+def draw_update():
+    if display is not None and gfx is not None:
+        gfx.clearLines(11, 64)
+        instances_copy = copy(instances)
+        for idx in range(0, len(instances_copy)):
+            p = instances_copy[idx]
+            if p.returncode is None:
+                gfx.drawText((0, ((5-idx)*10)),
+                    '%s:%d%%' % (p.serial, p.progress), (255,255,255))
+            elif p.returncode:
+                gfx.drawText((0, ((5-idx)*10)),
+                    '%s:%d%%' % (p.serial, p.progress), (255,0,0))
+            else:
+                gfx.drawText((0, ((5-idx)*10)),
+                    '%s:%d%%' % (p.serial, p.progress), (0,255,0))
+        gfx.display()
+            
+
 def instance_update(p, progress, complete, error):
     if complete:
+        # Find the entry in the list
         if error:
             logging.error('Error uploading to device %s: %s', p.serial, p.last_error)
             logging.debug('Dump from last failure: %s' % ('\n'.join(p.line_log)))
         else:
             logging.info('Device %s successfully updated', p.serial)
-        # Attempt to remove self from list
-        try:
-            instances.remove(p)
-        except ValueError:
-            pass
+        draw_update()
+    if complete or error:
+        clear_instance(p)
+        # Attempt to remove self from list in 60 seconds
+        # Timer(60.0, clear_instance, p)
     # Inform "UI thread" that an update is available
     instance_activity.set()
     #if blink_led
@@ -63,13 +95,30 @@ def deploy_firmware(device, vendor, model, filename, alt):
             serial=device['ID_SERIAL_SHORT'], prog_callback=instance_update)
     instances.append(p)
 
+def get_real_basename(filename):
+    if os.path.islink(filename):
+        p = os.readlink(filename)
+        if os.path.isabs(p):
+            return os.path.basename(p)
+        return os.path.basename(os.path.join(os.path.dirname(filename), p))
+    else:
+        return os.path.basename(filename)
+
 def main():
+    global display
+    global gfx
     args = parse_arguments()
     if args.verbose:
         logging.basicConfig(level=logging.DEBUG)
         logger.debug('Debug level enabled')
     else:
         logging.basicConfig(level=logging.INFO)
+    if args.OLED is not None:
+        print 'Importing '+str(args.OLED)
+        if args.OLED == 'SSD1331':
+            from SSD1331 import SSD1331, PILGFX
+            display = SSD1331()
+            gfx = PILGFX(display)
     logging.info('Start')
     existing_devs = list(context.list_devices(subsystem='usb', ID_VENDOR_ID=args.vendor,
         ID_MODEL_ID=args.model))
@@ -95,18 +144,20 @@ def main():
         instance_activity.wait(1.0)
         if instance_activity.isSet():
             statusmsg = []
-            for p in instances:
-                # In case we failed to remove an instance above:
-                # Ensure any instances that have completed are removed
+            for i in range(len(instances)):
+                p = instances[i]
                 if p.returncode is not None:
-                    instances.remove(p)
-                else:
-                    statusmsg.append('%s: %d%% ' % (p.serial, p.progress))
+                    clear_instance(p)
+                statusmsg.append('%s: %d%% ' % (p.serial, p.progress))
+                draw_update()
             # Print status to screen!
             sys.stdout.write('\r'+''.join(statusmsg))
             sys.stdout.flush()
         # Rate limit the console output
         time.sleep(0.2)
+        if display is not None and gfx is not None:
+            gfx.drawText((0,0), get_real_basename(args.file), (255,255,255))
+            gfx.display()
 
 if __name__ == '__main__':
     main()
